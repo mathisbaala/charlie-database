@@ -2,7 +2,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const MODEL = 'claude-sonnet-4-20250514';
+const MODEL = process.env.ANTHROPIC_MODEL?.trim() || 'claude-sonnet-4-6';
 
 export async function analyzeWithClaude(systemPrompt: string, userMessage: string): Promise<string> {
   const msg = await client.messages.create({
@@ -14,6 +14,119 @@ export async function analyzeWithClaude(systemPrompt: string, userMessage: strin
   const block = msg.content[0];
   if (block.type !== 'text') throw new Error('Réponse Claude inattendue');
   return block.text;
+}
+
+function stripMarkdownFences(text: string): string {
+  const trimmed = text.trim();
+  const match = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  return match ? match[1].trim() : trimmed;
+}
+
+function extractFirstJsonValue(text: string): string | null {
+  const start = text.search(/[\[{]/);
+  if (start === -1) return null;
+
+  const stack: string[] = [];
+  let inString = false;
+  let escaped = false;
+
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (ch === '{' || ch === '[') {
+      stack.push(ch);
+      continue;
+    }
+
+    if (ch === '}') {
+      if (stack.at(-1) !== '{') return null;
+      stack.pop();
+      if (stack.length === 0) return text.slice(start, i + 1);
+      continue;
+    }
+
+    if (ch === ']') {
+      if (stack.at(-1) !== '[') return null;
+      stack.pop();
+      if (stack.length === 0) return text.slice(start, i + 1);
+    }
+  }
+
+  return null;
+}
+
+export function parseClaudeJson<T>(raw: string): T {
+  const trimmed = raw.trim();
+  const withoutFences = stripMarkdownFences(trimmed);
+
+  const candidates = [withoutFences];
+  const extracted = extractFirstJsonValue(withoutFences);
+  if (extracted && extracted !== withoutFences) candidates.push(extracted);
+
+  const repairedCandidates = candidates.flatMap((candidate) => {
+    const noTrailingCommas = candidate.replace(/,\s*([}\]])/g, '$1');
+    const normalizedQuotes = noTrailingCommas
+      .replace(/[“”]/g, '"')
+      .replace(/[‘’]/g, "'");
+    return [candidate, noTrailingCommas, normalizedQuotes];
+  });
+
+  for (const candidate of repairedCandidates) {
+    try {
+      return JSON.parse(candidate) as T;
+    } catch {
+      // try next candidate
+    }
+  }
+
+  throw new Error('Reponse Claude non parseable en JSON valide');
+}
+
+async function repairClaudeJson(raw: string): Promise<string> {
+  const prompt = [
+    'Convertis le contenu suivant en JSON strictement valide.',
+    'Regles:',
+    '- Reponds uniquement avec du JSON valide.',
+    '- Ne mets aucun markdown, aucun commentaire.',
+    '- Conserve au maximum la structure et les valeurs d origine.',
+    '',
+    raw,
+  ].join('\n');
+
+  const msg = await client.messages.create({
+    model: MODEL,
+    max_tokens: 2500,
+    temperature: 0,
+    messages: [{ role: 'user', content: prompt }],
+  });
+  const block = msg.content[0];
+  if (block.type !== 'text') throw new Error('Reparation JSON Claude inattendue');
+  return block.text;
+}
+
+export async function parseClaudeJsonRobust<T>(raw: string): Promise<T> {
+  try {
+    return parseClaudeJson<T>(raw);
+  } catch {
+    const repairedRaw = await repairClaudeJson(raw);
+    return parseClaudeJson<T>(repairedRaw);
+  }
 }
 
 // ─── Prompt Due Diligence ──────────────────────────────────────────────────

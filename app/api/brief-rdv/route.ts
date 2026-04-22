@@ -2,7 +2,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getCompanyDetails, companyDetailsToContext } from '../../../lib/datagouv';
 import { getCompanyAnnouncements, bodaccToContext } from '../../../lib/bodacc';
-import { analyzeWithClaude, PROMPT_BRIEF_RDV } from '../../../lib/claude';
+import { analyzeWithClaude, parseClaudeJsonRobust, PROMPT_BRIEF_RDV } from '../../../lib/claude';
 import type { BriefRDVResult } from '../../../types';
 
 export async function POST(req: NextRequest) {
@@ -33,7 +33,7 @@ export async function POST(req: NextRequest) {
     ].join('\n');
 
     const raw = await analyzeWithClaude(PROMPT_BRIEF_RDV, userMessage);
-    const result = JSON.parse(raw) as BriefRDVResult;
+    const result = await parseClaudeJsonRobust<BriefRDVResult>(raw);
 
     return NextResponse.json(result);
   } catch (err) {

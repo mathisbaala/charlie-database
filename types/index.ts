@@ -1,7 +1,7 @@
 // charlie-live/types/index.ts
 
 // ─── Navigation ───────────────────────────────────────────────────────────
-export type UseCase = 'landing' | 'due-diligence' | 'kyc' | 'signaux' | 'surveillance' | 'brief-rdv';
+export type UseCase = 'due-diligence' | 'kyc' | 'signaux' | 'surveillance' | 'brief-rdv';
 
 // ─── Pappers API raw types ────────────────────────────────────────────────
 export interface PappersSearchResult {
@@ -267,13 +267,4 @@ export interface BriefRDVResult {
   sujets_a_aborder: string[];
   questions_preparees: string[];
   synthese: string;
-}
-
-// ─── Shared UI ────────────────────────────────────────────────────────────
-export type MCPSource = 'pappers' | 'datagouv' | 'bodacc' | 'inpi' | 'charlie';
-
-export interface LoadingStep {
-  label: string;
-  status?: 'pending' | 'active' | 'done';
-  duration?: number;
 }

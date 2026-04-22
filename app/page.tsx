@@ -1,30 +1,789 @@
-// charlie-live/app/page.tsx
 'use client';
 
-import { useState } from 'react';
-import { Header } from '../components/layout/Header';
-import { LandingPage } from '../components/layout/LandingPage';
-import { DueDiligence } from '../components/usecases/DueDiligence';
-import { KYC } from '../components/usecases/KYC';
-import { Signaux } from '../components/usecases/Signaux';
-import { Surveillance } from '../components/usecases/Surveillance';
-import { BriefRDV } from '../components/usecases/BriefRDV';
-import type { UseCase } from '../types';
+import { type ReactNode, useEffect, useState } from 'react';
+import type {
+  BriefRDVResult,
+  CompanySearchResult,
+  DueDiligenceResult,
+  KYCResult,
+  SignalHebdo,
+  SurveillanceResult,
+  UseCase,
+} from '../types';
 
-export default function Home() {
-  const [activeUseCase, setActiveUseCase] = useState<UseCase>('landing');
+type Tab = { id: UseCase; label: string };
+
+type RequestState<T> = {
+  loading: boolean;
+  error: string | null;
+  data: T | null;
+};
+
+const TABS: Tab[] = [
+  { id: 'due-diligence', label: 'Intelligence Client' },
+  { id: 'brief-rdv', label: 'Brief RDV' },
+  { id: 'signaux', label: 'Radar Portefeuille' },
+  { id: 'surveillance', label: 'Veille Continue' },
+  { id: 'kyc', label: 'Qualification KYC' },
+];
+
+const defaultState = <T,>(): RequestState<T> => ({
+  loading: false,
+  error: null,
+  data: null,
+});
+
+function PanelHeader({ title }: { title: string }) {
+  return (
+    <header className="panel-head">
+      <h2>{title}</h2>
+    </header>
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isPrimitive(value: unknown): value is string | number | boolean | null {
+  return value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
+}
+
+function toLabel(key: string): string {
+  const labels: Record<string, string> = {
+    societe: 'Societe',
+    entreprise: 'Entreprise',
+    identification: 'Identification',
+    actionnariat: 'Actionnariat',
+    filiales: 'Filiales',
+    screening: 'Screening',
+    structure: 'Structure',
+    score_lcb: 'Score LCB-FT',
+    score_vigilance: 'Score de vigilance',
+    alertes: 'Alertes',
+    signaux: 'Signaux',
+    actions: 'Actions recommandees',
+    analyse: 'Analyse',
+    synthese: 'Synthese',
+    depuis_dernier_rdv: 'Depuis le dernier RDV',
+    sujets_a_aborder: 'Sujets a aborder',
+    questions_preparees: 'Questions preparees',
+    procedure_collective: 'Procedure collective',
+    part_patrimoine: 'Part du patrimoine',
+    valeur_participation: 'Valeur de participation',
+    profil_risque: 'Profil de risque',
+    date_evenement: 'Date evenement',
+    description_courte: 'Description',
+    description_personnalisee: 'Description personnalisee',
+    action_suggeree: 'Action suggeree',
+    potentiel_min: 'Potentiel min',
+    potentiel_max: 'Potentiel max',
+  };
+  if (labels[key]) return labels[key];
+
+  return key
+    .replace(/_/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^./, (c) => c.toUpperCase());
+}
+
+function formatPrimitive(value: string | number | boolean | null): string {
+  if (value === null) return '-';
+  if (typeof value === 'boolean') return value ? 'Oui' : 'Non';
+  return String(value);
+}
+
+function getTone(value: string): 'success' | 'warn' | 'danger' | null {
+  const raw = value
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  const successValues = ['ras', 'saine', 'aucune', 'faible', 'conforme', 'non', 'opportunite'];
+  const warnValues = ['vigilance', 'moyen', 'a verifier'];
+  const dangerValues = ['alerte', 'critique', 'eleve', 'en cours'];
+
+  if (successValues.includes(raw)) return 'success';
+  if (warnValues.includes(raw)) return 'warn';
+  if (dangerValues.includes(raw)) return 'danger';
+  return null;
+}
+
+function resolveCardTitle(value: Record<string, unknown>, index: number): string {
+  const keys = ['titre', 'nom', 'societe', 'entreprise', 'categorie', 'type', 'siren'];
+  for (const key of keys) {
+    const candidate = value[key];
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+  }
+  return `Element ${index + 1}`;
+}
+
+type OverviewItem = {
+  label: string;
+  value: string;
+  tone: 'success' | 'warn' | 'danger' | null;
+};
+
+type Overview = {
+  title: string | null;
+  subtitle: string | null;
+  items: OverviewItem[];
+};
+
+const ARRAY_META_KEYS = [
+  'signal_niveau',
+  'niveau',
+  'urgence',
+  'type',
+  'categorie',
+  'date_evenement',
+  'source',
+  'siren',
+];
+
+function getPathValue(source: Record<string, unknown>, path: string[]): unknown {
+  let current: unknown = source;
+  for (const key of path) {
+    if (!isRecord(current)) return null;
+    current = current[key];
+  }
+  return current;
+}
+
+function getFirstText(source: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+function buildOverview(data: unknown): Overview | null {
+  if (!isRecord(data)) return null;
+
+  const primary = (['societe', 'entreprise', 'identification']
+    .map((key) => data[key])
+    .find((item) => isRecord(item)) as Record<string, unknown> | undefined) ?? data;
+
+  const title = getFirstText(primary, ['nom', 'nom_entreprise']) ?? null;
+  const siren = getFirstText(primary, ['siren']);
+  const role = getFirstText(primary, ['role']);
+  const subtitle = [siren ? `SIREN ${siren}` : null, role].filter(Boolean).join(' • ') || null;
+
+  const items: OverviewItem[] = [];
+  const statusPaths: Array<{ label: string; path: string[] }> = [
+    { label: 'Sante', path: ['entreprise', 'sante'] },
+    { label: 'Procedure', path: ['entreprise', 'procedure'] },
+    { label: 'Procedure', path: ['societe', 'procedure_collective'] },
+    { label: 'PPE', path: ['screening', 'ppe'] },
+    { label: 'Sanctions EU', path: ['screening', 'sanctions_eu'] },
+    { label: 'Sanctions OFAC', path: ['screening', 'sanctions_ofac'] },
+    { label: 'Niveau LCB', path: ['score_lcb', 'niveau'] },
+  ];
+
+  for (const target of statusPaths) {
+    if (items.some((item) => item.label === target.label)) continue;
+    const value = getPathValue(data, target.path);
+    if (!isPrimitive(value) || value === null) continue;
+    const text = formatPrimitive(value);
+    items.push({
+      label: target.label,
+      value: text,
+      tone: typeof value === 'string' ? getTone(value) : null,
+    });
+  }
+
+  for (const [key, value] of Object.entries(data)) {
+    if (!Array.isArray(value) || items.length >= 8) continue;
+    items.push({
+      label: toLabel(key),
+      value: `${value.length}`,
+      tone: null,
+    });
+  }
+
+  return { title, subtitle, items };
+}
+
+function ResultOverview({ data }: { data: unknown }) {
+  const overview = buildOverview(data);
+  if (!overview || (!overview.title && overview.items.length === 0)) return null;
 
   return (
-    <div className="flex flex-col min-h-full">
-      <Header active={activeUseCase} onNavigate={setActiveUseCase} />
+    <section className="result-overview">
+      <div className="result-overview-main">
+        {overview.title && <h4>{overview.title}</h4>}
+        {overview.subtitle && <p>{overview.subtitle}</p>}
+      </div>
+      {overview.items.length > 0 && (
+        <div className="result-overview-list">
+          {overview.items.map((item, index) => (
+            <span key={`${item.label}-${index}`} className={item.tone ? `overview-chip overview-chip-${item.tone}` : 'overview-chip'}>
+              <strong>{item.label}</strong>
+              <span>{item.value}</span>
+            </span>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
 
-      <main className="flex-1 w-full max-w-3xl mx-auto px-4 py-8">
-        {activeUseCase === 'landing' && <LandingPage onSelect={setActiveUseCase} />}
-        {activeUseCase === 'due-diligence' && <DueDiligence />}
-        {activeUseCase === 'brief-rdv' && <BriefRDV />}
-        {activeUseCase === 'kyc' && <KYC />}
-        {activeUseCase === 'signaux' && <Signaux />}
-        {activeUseCase === 'surveillance' && <Surveillance />}
+function splitCardRecord(record: Record<string, unknown>) {
+  const meta: Array<{ key: string; value: string | number | boolean | null; tone: 'success' | 'warn' | 'danger' | null }> = [];
+  const rest: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(record)) {
+    if (
+      meta.length < 4 &&
+      ARRAY_META_KEYS.includes(key) &&
+      isPrimitive(value)
+    ) {
+      meta.push({
+        key,
+        value,
+        tone: typeof value === 'string' ? getTone(value) : null,
+      });
+      continue;
+    }
+    rest[key] = value;
+  }
+
+  return { meta, rest };
+}
+
+function getDominantTone(meta: Array<{ tone: 'success' | 'warn' | 'danger' | null }>): 'success' | 'warn' | 'danger' | null {
+  if (meta.some((entry) => entry.tone === 'danger')) return 'danger';
+  if (meta.some((entry) => entry.tone === 'warn')) return 'warn';
+  if (meta.some((entry) => entry.tone === 'success')) return 'success';
+  return null;
+}
+
+function PrimitiveValue({ value }: { value: string | number | boolean | null }) {
+  const text = formatPrimitive(value);
+  const tone = typeof value === 'string' ? getTone(value) : null;
+
+  if (!tone) return <span className="kv-value">{text}</span>;
+  return <span className={`kv-value kv-value-${tone}`}>{text}</span>;
+}
+
+function ResultValue({ value, level = 0 }: { value: unknown; level?: number }): ReactNode {
+  if (isPrimitive(value)) return <PrimitiveValue value={value} />;
+  if (Array.isArray(value)) {
+    if (value.length === 0) return <p className="empty-note">Aucune donnee.</p>;
+
+    const onlyPrimitives = value.every((item) => isPrimitive(item));
+    if (onlyPrimitives) {
+      return (
+        <ul className="value-list">
+          {value.map((item, idx) => (
+            <li key={idx}>
+              <PrimitiveValue value={item as string | number | boolean | null} />
+            </li>
+          ))}
+        </ul>
+      );
+    }
+
+    const onlyObjects = value.every((item) => isRecord(item));
+    if (onlyObjects) {
+      return (
+        <div className="result-array-grid">
+          {value.map((item, idx) => {
+            const record = item as Record<string, unknown>;
+            const { meta, rest } = splitCardRecord(record);
+            const cardValue = Object.keys(rest).length > 0 ? rest : record;
+            const dominantTone = getDominantTone(meta);
+            return (
+              <article
+                key={idx}
+                className={dominantTone ? `array-card array-card-${dominantTone}` : 'array-card'}
+              >
+                <div className="array-card-head">
+                  <p className="array-title">{resolveCardTitle(record, idx)}</p>
+                  {meta.length > 0 && (
+                    <div className="array-meta">
+                      {meta.map((entry) => (
+                        <span
+                          key={entry.key}
+                          className={entry.tone ? `array-meta-chip array-meta-chip-${entry.tone}` : 'array-meta-chip'}
+                        >
+                          <strong>{toLabel(entry.key)}</strong>
+                          <span>{formatPrimitive(entry.value)}</span>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <ResultValue value={cardValue} level={level + 1} />
+              </article>
+            );
+          })}
+        </div>
+      );
+    }
+
+    return (
+      <div className="mixed-list">
+        {value.map((item, idx) => (
+          <div key={idx} className="mixed-item">
+            <ResultValue value={item} level={level + 1} />
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (isRecord(value)) {
+    const entries = Object.entries(value);
+    const primitiveEntries = entries.filter(([, current]) => isPrimitive(current));
+    const complexEntries = entries.filter(([, current]) => !isPrimitive(current));
+
+    return (
+      <div className={level === 0 ? 'result-object' : 'result-object result-object-nested'}>
+        {primitiveEntries.length > 0 && (
+          <div className="kv-grid">
+            {primitiveEntries.map(([key, current]) => {
+              const textBlock =
+                typeof current === 'string' && (current.length > 110 || current.includes('\n'));
+              return (
+                <div key={key} className={textBlock ? 'kv-item kv-item-text' : 'kv-item'}>
+                  <span className="kv-key">{toLabel(key)}</span>
+                  <div className="kv-content">
+                    <ResultValue value={current} level={level + 1} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {complexEntries.length > 0 && (
+          <div className="result-subsections">
+            {complexEntries.map(([key, current]) => (
+              <section key={key} className="result-subsection">
+                <h4>{Array.isArray(current) ? `${toLabel(key)} (${current.length})` : toLabel(key)}</h4>
+                <ResultValue value={current} level={level + 1} />
+              </section>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return <span className="kv-value">{String(value)}</span>;
+}
+
+function ResultBlock<T>({
+  title,
+  state,
+  className,
+  eyebrow,
+}: {
+  title: string;
+  state: RequestState<T>;
+  className?: string;
+  eyebrow?: string;
+}) {
+  if (state.loading) return <p className="state state-loading">Chargement...</p>;
+  if (state.error) return <p className="state state-error">{state.error}</p>;
+  if (!state.data) return null;
+
+  return (
+    <section className={className ? `result-block ${className}` : 'result-block'}>
+      <div className="result-head">
+        {eyebrow && <span className="result-eyebrow">{eyebrow}</span>}
+        <h3>{title}</h3>
+      </div>
+      <div className="result-readable">
+        <ResultOverview data={state.data} />
+        <ResultValue value={state.data} />
+      </div>
+    </section>
+  );
+}
+
+function CompanyPicker({
+  onChange,
+  disabled,
+}: {
+  onChange: (company: CompanySearchResult | null) => void;
+  disabled?: boolean;
+}) {
+  const [query, setQuery] = useState('');
+  const [open, setOpen] = useState(false);
+  const [results, setResults] = useState<CompanySearchResult[]>([]);
+
+  useEffect(() => {
+    const trimmed = query.trim();
+    if (trimmed.length < 2) return;
+
+    const controller = new AbortController();
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/search?q=${encodeURIComponent(trimmed)}`, {
+          signal: controller.signal,
+        });
+        const json = (await res.json()) as { results?: CompanySearchResult[] };
+        setResults(json.results ?? []);
+        setOpen(true);
+      } catch {
+        setResults([]);
+      }
+    }, 250);
+
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [query]);
+
+  return (
+    <div className="field">
+      <label>Entreprise</label>
+      <div className="search-wrap">
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            if (!e.target.value.trim()) {
+              onChange(null);
+              setOpen(false);
+            }
+          }}
+          placeholder="Nom ou SIREN"
+          disabled={disabled}
+          onFocus={() => results.length > 0 && setOpen(true)}
+        />
+      </div>
+
+      {query.trim().length >= 2 && open && results.length > 0 && (
+        <div className="search-results">
+          {results.map((item) => (
+            <button
+              key={item.siren}
+              type="button"
+              className="search-item"
+              onClick={() => {
+                onChange(item);
+                setQuery(item.nom);
+                setOpen(false);
+              }}
+            >
+              <strong>{item.nom}</strong>
+              <span>{item.siren}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DueDiligencePanel() {
+  const [company, setCompany] = useState<CompanySearchResult | null>(null);
+  const [context, setContext] = useState('');
+  const [state, setState] = useState<RequestState<DueDiligenceResult>>(defaultState);
+
+  const submit = async () => {
+    if (!company) return;
+    setState({ loading: true, error: null, data: null });
+    try {
+      const res = await fetch('/api/due-diligence', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          siren: company.siren,
+          context: context.trim() || undefined,
+        }),
+      });
+      const json = (await res.json()) as DueDiligenceResult & { error?: string };
+      if (!res.ok || json.error) throw new Error(json.error ?? 'Erreur API');
+      setState({ loading: false, error: null, data: json });
+    } catch (err) {
+      setState({
+        loading: false,
+        error: err instanceof Error ? err.message : 'Erreur inconnue',
+        data: null,
+      });
+    }
+  };
+
+  return (
+    <section className="panel panel-due-diligence">
+      <PanelHeader title="Intelligence Client" />
+      <CompanyPicker onChange={setCompany} disabled={state.loading} />
+      <div className="field">
+        <label>Contexte conseiller (optionnel)</label>
+        <textarea
+          rows={3}
+          value={context}
+          onChange={(e) => setContext(e.target.value)}
+          placeholder="Objectifs, contexte patrimonial, points d'attention..."
+        />
+      </div>
+      <button className="btn-primary" onClick={submit} disabled={!company || state.loading}>
+        Analyser le dossier
+      </button>
+      <ResultBlock
+        title="Synthese Intelligence Client"
+        state={state}
+        className="result-block-premium"
+        eyebrow="Sortie Charlie"
+      />
+    </section>
+  );
+}
+
+function BriefPanel() {
+  const [company, setCompany] = useState<CompanySearchResult | null>(null);
+  const [context, setContext] = useState('');
+  const [state, setState] = useState<RequestState<BriefRDVResult>>(defaultState);
+
+  const submit = async () => {
+    if (!company) return;
+    setState({ loading: true, error: null, data: null });
+    try {
+      const res = await fetch('/api/brief-rdv', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          siren: company.siren,
+          contexte_rdv: context.trim() || undefined,
+        }),
+      });
+      const json = (await res.json()) as BriefRDVResult & { error?: string };
+      if (!res.ok || json.error) throw new Error(json.error ?? 'Erreur API');
+      setState({ loading: false, error: null, data: json });
+    } catch (err) {
+      setState({
+        loading: false,
+        error: err instanceof Error ? err.message : 'Erreur inconnue',
+        data: null,
+      });
+    }
+  };
+
+  return (
+    <section className="panel">
+      <PanelHeader title="Brief RDV" />
+      <CompanyPicker onChange={setCompany} disabled={state.loading} />
+      <div className="field">
+        <label>Contexte RDV (optionnel)</label>
+        <textarea
+          rows={3}
+          value={context}
+          onChange={(e) => setContext(e.target.value)}
+          placeholder="Objectif du rendez-vous, sujets sensibles, dernier echange..."
+        />
+      </div>
+      <button className="btn-primary" onClick={submit} disabled={!company || state.loading}>
+        Generer le brief
+      </button>
+      <ResultBlock title="Resultat Brief RDV" state={state} />
+    </section>
+  );
+}
+
+function SignauxPanel() {
+  const [state, setState] = useState<RequestState<{ signaux: SignalHebdo[] }>>(defaultState);
+
+  const submit = async () => {
+    setState({ loading: true, error: null, data: null });
+    try {
+      const res = await fetch('/api/signaux');
+      const json = (await res.json()) as { signaux?: SignalHebdo[]; error?: string };
+      if (!res.ok || json.error) throw new Error(json.error ?? 'Erreur API');
+      setState({ loading: false, error: null, data: { signaux: json.signaux ?? [] } });
+    } catch (err) {
+      setState({
+        loading: false,
+        error: err instanceof Error ? err.message : 'Erreur inconnue',
+        data: null,
+      });
+    }
+  };
+
+  return (
+    <section className="panel">
+      <PanelHeader title="Radar Portefeuille" />
+      <button className="btn-primary" onClick={submit} disabled={state.loading}>
+        Scanner les signaux
+      </button>
+      <ResultBlock title="Resultat Radar Portefeuille" state={state} />
+    </section>
+  );
+}
+
+function SurveillancePanel() {
+  const [company, setCompany] = useState<CompanySearchResult | null>(null);
+  const [profil, setProfil] = useState('Equilibre');
+  const [part, setPart] = useState('40%');
+  const [valeur, setValeur] = useState('2.5 M EUR');
+  const [objectifs, setObjectifs] = useState('Transmission, diversification');
+  const [state, setState] = useState<RequestState<SurveillanceResult>>(defaultState);
+
+  const submit = async () => {
+    if (!company) return;
+    setState({ loading: true, error: null, data: null });
+    try {
+      const res = await fetch('/api/surveillance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          siren: company.siren,
+          config: {
+            profil_risque: profil,
+            part_patrimoine: part,
+            valeur_participation: valeur,
+            objectifs: objectifs
+              .split(',')
+              .map((x) => x.trim())
+              .filter(Boolean),
+          },
+        }),
+      });
+      const json = (await res.json()) as SurveillanceResult & { error?: string };
+      if (!res.ok || json.error) throw new Error(json.error ?? 'Erreur API');
+      setState({ loading: false, error: null, data: json });
+    } catch (err) {
+      setState({
+        loading: false,
+        error: err instanceof Error ? err.message : 'Erreur inconnue',
+        data: null,
+      });
+    }
+  };
+
+  return (
+    <section className="panel">
+      <PanelHeader title="Veille Continue" />
+      <CompanyPicker onChange={setCompany} disabled={state.loading} />
+      <div className="grid-two">
+        <div className="field">
+          <label>Profil de risque</label>
+          <select value={profil} onChange={(e) => setProfil(e.target.value)}>
+            <option>Conservateur</option>
+            <option>Equilibre</option>
+            <option>Dynamique</option>
+            <option>Entrepreneur</option>
+          </select>
+        </div>
+        <div className="field">
+          <label>Part dans le patrimoine</label>
+          <input value={part} onChange={(e) => setPart(e.target.value)} />
+        </div>
+      </div>
+      <div className="grid-two">
+        <div className="field">
+          <label>Valeur estimee</label>
+          <input value={valeur} onChange={(e) => setValeur(e.target.value)} />
+        </div>
+        <div className="field">
+          <label>Objectifs (separes par virgule)</label>
+          <input value={objectifs} onChange={(e) => setObjectifs(e.target.value)} />
+        </div>
+      </div>
+      <button className="btn-primary" onClick={submit} disabled={!company || state.loading}>
+        Lancer la surveillance
+      </button>
+      <ResultBlock title="Resultat Veille Continue" state={state} />
+    </section>
+  );
+}
+
+function KycPanel() {
+  const [company, setCompany] = useState<CompanySearchResult | null>(null);
+  const [nom, setNom] = useState('');
+  const [type, setType] = useState('Dirigeant');
+  const [state, setState] = useState<RequestState<KYCResult>>(defaultState);
+
+  const submit = async () => {
+    if (!company && !nom.trim()) return;
+    setState({ loading: true, error: null, data: null });
+    try {
+      const res = await fetch('/api/kyc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          siren: company?.siren ?? '',
+          nom: nom.trim() || company?.nom || '',
+          type,
+        }),
+      });
+      const json = (await res.json()) as KYCResult & { error?: string };
+      if (!res.ok || json.error) throw new Error(json.error ?? 'Erreur API');
+      setState({ loading: false, error: null, data: json });
+    } catch (err) {
+      setState({
+        loading: false,
+        error: err instanceof Error ? err.message : 'Erreur inconnue',
+        data: null,
+      });
+    }
+  };
+
+  return (
+    <section className="panel">
+      <PanelHeader title="Qualification KYC" />
+      <CompanyPicker onChange={setCompany} disabled={state.loading} />
+      <div className="grid-two">
+        <div className="field">
+          <label>Nom (optionnel)</label>
+          <input
+            value={nom}
+            onChange={(e) => setNom(e.target.value)}
+            placeholder="Nom du dirigeant ou de la personne"
+          />
+        </div>
+        <div className="field">
+          <label>Type</label>
+          <select value={type} onChange={(e) => setType(e.target.value)}>
+            <option>Dirigeant</option>
+            <option>Actionnaire</option>
+            <option>Beneficiaire effectif</option>
+            <option>Entreprise</option>
+          </select>
+        </div>
+      </div>
+      <button className="btn-primary" onClick={submit} disabled={state.loading || (!company && !nom.trim())}>
+        Generer le dossier KYC
+      </button>
+      <ResultBlock title="Resultat KYC" state={state} />
+    </section>
+  );
+}
+
+export default function HomePage() {
+  const [active, setActive] = useState<UseCase>('due-diligence');
+
+  return (
+    <div className="app">
+      <header className="topbar">
+        <p className="brand">Charlie</p>
+      </header>
+
+      <nav className="tabs">
+        {TABS.map((tab) => (
+          <button
+            key={tab.id}
+            className={active === tab.id ? 'tab tab-active' : 'tab'}
+            onClick={() => setActive(tab.id)}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </nav>
+
+      <main className="main">
+        {active === 'due-diligence' && <DueDiligencePanel />}
+        {active === 'brief-rdv' && <BriefPanel />}
+        {active === 'signaux' && <SignauxPanel />}
+        {active === 'surveillance' && <SurveillancePanel />}
+        {active === 'kyc' && <KycPanel />}
       </main>
     </div>
   );
