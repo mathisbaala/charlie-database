@@ -1,11 +1,34 @@
-// charlie-live/app/api/signaux/route.ts
-import { NextResponse } from 'next/server';
+// charlie-database/app/api/signaux/route.ts
+import { NextRequest, NextResponse } from 'next/server';
 import { getRecentAnnouncements } from '../../../lib/bodacc';
 import { getCompany, companyToContext } from '../../../lib/pappers';
 import { analyzeWithClaude, parseClaudeJsonRobust, PROMPT_SIGNAUX } from '../../../lib/claude';
+import { jsonException, getRequestId } from '../../../lib/http';
+import { logError, logInfo, logWarn } from '../../../lib/logger';
+import { recordApiMetric } from '../../../lib/metrics';
+import { enforceApiSecurity } from '../../../lib/security';
+import { claudeSchemas } from '../../../lib/schemas';
 import type { SignalHebdo } from '../../../types';
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const route = '/api/signaux';
+  const startedAt = Date.now();
+  const requestId = getRequestId(req);
+  logInfo('api.request.start', { route, method: 'GET', request_id: requestId });
+
+  const denied = await enforceApiSecurity(req, 'signaux', requestId);
+  if (denied) {
+    recordApiMetric(route, denied.status, Date.now() - startedAt);
+    logWarn('api.request.denied', {
+      route,
+      method: 'GET',
+      request_id: requestId,
+      status: denied.status,
+      duration_ms: Date.now() - startedAt,
+    });
+    return denied;
+  }
+
   try {
     // 1. Récupère les annonces BODACC récentes
     const announcements = await getRecentAnnouncements(40);
@@ -51,12 +74,30 @@ export async function GET() {
     ].join('\n');
 
     const raw = await analyzeWithClaude(PROMPT_SIGNAUX, userMessage);
-    const result = await parseClaudeJsonRobust<SignalHebdo[]>(raw);
+    const result = await parseClaudeJsonRobust<SignalHebdo[]>(raw, claudeSchemas.signaux);
 
-    return NextResponse.json({ signaux: result });
+    logInfo('api.request.success', {
+      route,
+      method: 'GET',
+      request_id: requestId,
+      status: 200,
+      duration_ms: Date.now() - startedAt,
+    });
+    recordApiMetric(route, 200, Date.now() - startedAt);
+    return NextResponse.json({ signaux: result }, { headers: { 'x-request-id': requestId } });
   } catch (err) {
-    console.error('[/api/signaux]', err);
-    const message = err instanceof Error ? err.message : 'Erreur interne';
-    return NextResponse.json({ error: message }, { status: 500 });
+    const response = jsonException(err, requestId);
+    recordApiMetric(route, response.status, Date.now() - startedAt);
+    logError(
+      'api.request.error',
+      {
+        route,
+        method: 'GET',
+        request_id: requestId,
+        duration_ms: Date.now() - startedAt,
+      },
+      err
+    );
+    return response;
   }
 }

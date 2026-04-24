@@ -1,15 +1,40 @@
-// charlie-live/app/api/kyc/route.ts
+// charlie-database/app/api/kyc/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { getCompanyDetails, companyDetailsToContext } from '../../../lib/datagouv';
 import { analyzeWithClaude, parseClaudeJsonRobust, PROMPT_KYC } from '../../../lib/claude';
+import { parseJsonBody, jsonError, jsonException, getRequestId } from '../../../lib/http';
+import { logError, logInfo, logWarn } from '../../../lib/logger';
+import { recordApiMetric } from '../../../lib/metrics';
+import { enforceApiSecurity } from '../../../lib/security';
+import { kycRequestSchema, claudeSchemas } from '../../../lib/schemas';
 import type { KYCResult } from '../../../types';
 
 export async function POST(req: NextRequest) {
-  const body = await req.json() as { siren: string; nom: string; type: string };
-  const { siren, nom, type } = body;
+  const route = '/api/kyc';
+  const startedAt = Date.now();
+  const requestId = getRequestId(req);
+  logInfo('api.request.start', { route, method: 'POST', request_id: requestId });
+
+  const denied = await enforceApiSecurity(req, 'kyc', requestId);
+  if (denied) {
+    recordApiMetric(route, denied.status, Date.now() - startedAt);
+    logWarn('api.request.denied', {
+      route,
+      method: 'POST',
+      request_id: requestId,
+      status: denied.status,
+      duration_ms: Date.now() - startedAt,
+    });
+    return denied;
+  }
+
+  const parsedBody = await parseJsonBody(req, kycRequestSchema);
+  if (!parsedBody.ok) return parsedBody.response;
+
+  const { siren, nom, type } = parsedBody.data;
 
   if (!siren && !nom) {
-    return NextResponse.json({ error: 'siren ou nom requis' }, { status: 400 });
+    return jsonError('siren ou nom requis', 400, 'BAD_REQUEST', undefined, requestId);
   }
 
   try {
@@ -28,12 +53,30 @@ export async function POST(req: NextRequest) {
     ].join('\n');
 
     const raw = await analyzeWithClaude(PROMPT_KYC, userMessage);
-    const result = await parseClaudeJsonRobust<KYCResult>(raw);
+    const result = await parseClaudeJsonRobust<KYCResult>(raw, claudeSchemas.kyc);
 
-    return NextResponse.json(result);
+    logInfo('api.request.success', {
+      route,
+      method: 'POST',
+      request_id: requestId,
+      status: 200,
+      duration_ms: Date.now() - startedAt,
+    });
+    recordApiMetric(route, 200, Date.now() - startedAt);
+    return NextResponse.json(result, { headers: { 'x-request-id': requestId } });
   } catch (err) {
-    console.error('[/api/kyc]', err);
-    const message = err instanceof Error ? err.message : 'Erreur interne';
-    return NextResponse.json({ error: message }, { status: 500 });
+    const response = jsonException(err, requestId);
+    recordApiMetric(route, response.status, Date.now() - startedAt);
+    logError(
+      'api.request.error',
+      {
+        route,
+        method: 'POST',
+        request_id: requestId,
+        duration_ms: Date.now() - startedAt,
+      },
+      err
+    );
+    return response;
   }
 }

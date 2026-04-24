@@ -1,7 +1,10 @@
-// charlie-live/lib/pappers.ts
-import type { PappersCompany, PappersSearchResult } from '../types';
+// charlie-database/lib/pappers.ts
+import type { PappersCompany } from '../types';
+import { withSpan } from './telemetry';
+import { recordUpstreamMetric } from './metrics';
 
 const BASE = 'https://api.pappers.fr/v2';
+const FETCH_TIMEOUT_MS = Number(process.env.UPSTREAM_FETCH_TIMEOUT_MS ?? '12000');
 
 function getToken(): string {
   const t = process.env.PAPPERS_API_KEY;
@@ -12,30 +15,13 @@ function getToken(): string {
 }
 
 function formatAmount(euros?: number): string {
-  if (!euros) return 'N/D';
+  if (euros == null) return 'N/D';
   if (euros >= 1_000_000) return `${(euros / 1_000_000).toFixed(1).replace('.', ',')} M€`;
   if (euros >= 1_000) return `${(euros / 1_000).toFixed(0)} K€`;
   return `${euros} €`;
 }
 
 export { formatAmount };
-
-/**
- * Recherche d'entreprises par nom ou SIREN.
- * Retourne les 5 premiers résultats.
- */
-export async function searchCompanies(query: string): Promise<PappersSearchResult[]> {
-  const url = new URL(`${BASE}/recherche`);
-  url.searchParams.set('q', query);
-  url.searchParams.set('par_page', '5');
-  url.searchParams.set('api_token', getToken());
-
-  const res = await fetch(url.toString(), { next: { revalidate: 60 } });
-  if (!res.ok) throw new Error(`Pappers recherche: ${res.status}`);
-
-  const data = await res.json();
-  return (data.resultats ?? []) as PappersSearchResult[];
-}
 
 /**
  * Récupère les données complètes d'une entreprise par SIREN.
@@ -51,33 +37,43 @@ export async function getCompany(siren: string): Promise<PappersCompany> {
   url.searchParams.set('publications_bodacc', '1');
   url.searchParams.set('beneficiaires', '1');
 
-  const res = await fetch(url.toString(), { next: { revalidate: 300 } });
+  const res = await withSpan(
+    'upstream.pappers.company',
+    {
+      'upstream.name': 'pappers',
+      'company.siren': siren,
+      'http.url': url.toString(),
+    },
+    async () => {
+      const startedAt = Date.now();
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+      return fetch(url.toString(), {
+        next: { revalidate: 300 },
+        signal: controller.signal,
+      })
+        .then((response) => {
+          recordUpstreamMetric('pappers.company', response.status, Date.now() - startedAt);
+          return response;
+        })
+        .catch((err) => {
+          recordUpstreamMetric('pappers.company', 0, Date.now() - startedAt);
+          throw err;
+        })
+        .finally(() => clearTimeout(timeoutId));
+    }
+  );
   if (!res.ok) throw new Error(`Pappers entreprise ${siren}: ${res.status}`);
 
   return res.json() as Promise<PappersCompany>;
 }
 
 /**
- * Récupère uniquement les bénéficiaires effectifs d'une entreprise.
- */
-export async function getBeneficiaires(siren: string) {
-  const url = new URL(`${BASE}/beneficiaires`);
-  url.searchParams.set('siren', siren.replace(/\s/g, ''));
-  url.searchParams.set('api_token', getToken());
-
-  const res = await fetch(url.toString(), { next: { revalidate: 300 } });
-  if (!res.ok) throw new Error(`Pappers bénéficiaires ${siren}: ${res.status}`);
-
-  const data = await res.json();
-  return data.beneficiaires ?? [];
-}
-
-/**
  * Helper : extrait les données financières les plus récentes.
  */
-export function getLatestFinance(company: PappersCompany) {
+function getLatestFinance(company: PappersCompany) {
   if (!company.finances?.length) return null;
-  return company.finances.sort((a, b) => b.annee - a.annee)[0];
+  return [...company.finances].sort((a, b) => b.annee - a.annee)[0];
 }
 
 /**

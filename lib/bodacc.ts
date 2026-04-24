@@ -1,11 +1,40 @@
-// charlie-live/lib/bodacc.ts
+// charlie-database/lib/bodacc.ts
 // API : BODACC DILA — bodacc-datadila.opendatasoft.com (API Explorer v2.1)
 // L'ancien endpoint datanova.fr est mort (NXDOMAIN). Toutes les annonces
 // (A, B, C) sont désormais dans le dataset unique "annonces-commerciales".
 import type { BODACCAnnouncement } from '../types';
+import { withSpan } from './telemetry';
+import { recordUpstreamMetric } from './metrics';
 
 const BODACC_BASE =
   'https://bodacc-datadila.opendatasoft.com/api/explore/v2.1/catalog/datasets/annonces-commerciales/records';
+const FETCH_TIMEOUT_MS = Number(process.env.UPSTREAM_FETCH_TIMEOUT_MS ?? '12000');
+
+async function fetchBodacc(url: string, revalidate = 3600): Promise<Response> {
+  return withSpan(
+    'upstream.bodacc.fetch',
+    {
+      'upstream.name': 'bodacc',
+      'http.url': url,
+      'cache.revalidate': revalidate,
+    },
+    async () => {
+      const startedAt = Date.now();
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+      return fetch(url, { next: { revalidate }, signal: controller.signal })
+        .then((response) => {
+          recordUpstreamMetric('bodacc', response.status, Date.now() - startedAt);
+          return response;
+        })
+        .catch((err) => {
+          recordUpstreamMetric('bodacc', 0, Date.now() - startedAt);
+          throw err;
+        })
+        .finally(() => clearTimeout(timeoutId));
+    }
+  );
+}
 
 /**
  * Convertit un record brut de l'API v2.1 en BODACCAnnouncement.
@@ -44,7 +73,7 @@ export async function getRecentAnnouncements(rows = 40): Promise<BODACCAnnouncem
   url.searchParams.set('order_by', 'dateparution DESC');
 
   try {
-    const res = await fetch(url.toString(), { next: { revalidate: 3600 } });
+    const res = await fetchBodacc(url.toString());
     if (!res.ok) throw new Error(`BODACC HTTP ${res.status}`);
     const data = await res.json() as { results?: Record<string, unknown>[] };
     const results = data.results ?? [];
@@ -70,7 +99,7 @@ export async function getCompanyAnnouncements(siren: string, rows = 10): Promise
   url.searchParams.set('order_by', 'dateparution DESC');
 
   try {
-    const res = await fetch(url.toString(), { next: { revalidate: 3600 } });
+    const res = await fetchBodacc(url.toString());
     if (!res.ok) throw new Error(`BODACC HTTP ${res.status}`);
     const data = await res.json() as { results?: Record<string, unknown>[] };
     return (data.results ?? []).map(recordToAnnouncement);

@@ -1,18 +1,17 @@
-// charlie-database/app/api/search/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import { searchEntreprises } from '../../../lib/datagouv';
-import { jsonException, getRequestId } from '../../../lib/http';
+import { getRequestId, jsonException } from '../../../lib/http';
 import { logError, logInfo, logWarn } from '../../../lib/logger';
-import { recordApiMetric } from '../../../lib/metrics';
+import { getMetricsSnapshot, recordApiMetric } from '../../../lib/metrics';
+import { getObservabilityHealth } from '../../../lib/observability';
 import { enforceApiSecurity } from '../../../lib/security';
 
 export async function GET(req: NextRequest) {
-  const route = '/api/search';
+  const route = '/api/metrics';
   const startedAt = Date.now();
   const requestId = getRequestId(req);
   logInfo('api.request.start', { route, method: 'GET', request_id: requestId });
 
-  const denied = await enforceApiSecurity(req, 'search', requestId);
+  const denied = await enforceApiSecurity(req, 'metrics', requestId);
   if (denied) {
     recordApiMetric(route, denied.status, Date.now() - startedAt);
     logWarn('api.request.denied', {
@@ -25,32 +24,28 @@ export async function GET(req: NextRequest) {
     return denied;
   }
 
-  const q = req.nextUrl.searchParams.get('q')?.trim();
-  if (!q || q.length < 3) {
-    logInfo('api.request.success', {
-      route,
-      method: 'GET',
-      request_id: requestId,
-      status: 200,
-      duration_ms: Date.now() - startedAt,
-      empty: true,
-    });
-    recordApiMetric(route, 200, Date.now() - startedAt);
-    return NextResponse.json({ results: [] }, { headers: { 'x-request-id': requestId } });
-  }
-
   try {
-    const results = await searchEntreprises(q);
+    const snapshot = getMetricsSnapshot();
+    const observability = await getObservabilityHealth();
+
+    const payload = {
+      request_id: requestId,
+      ...snapshot,
+      observability,
+    };
+
+    recordApiMetric(route, 200, Date.now() - startedAt);
     logInfo('api.request.success', {
       route,
       method: 'GET',
       request_id: requestId,
       status: 200,
       duration_ms: Date.now() - startedAt,
-      count: results.length,
     });
-    recordApiMetric(route, 200, Date.now() - startedAt);
-    return NextResponse.json({ results }, { headers: { 'x-request-id': requestId } });
+
+    return NextResponse.json(payload, {
+      headers: { 'x-request-id': requestId },
+    });
   } catch (err) {
     const response = jsonException(err, requestId);
     recordApiMetric(route, response.status, Date.now() - startedAt);

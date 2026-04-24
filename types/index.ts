@@ -1,18 +1,7 @@
-// charlie-live/types/index.ts
+// charlie-database/types/index.ts
 
 // ─── Navigation ───────────────────────────────────────────────────────────
 export type UseCase = 'due-diligence' | 'kyc' | 'signaux' | 'surveillance' | 'brief-rdv';
-
-// ─── Pappers API raw types ────────────────────────────────────────────────
-export interface PappersSearchResult {
-  siren: string;
-  nom_entreprise: string;
-  forme_juridique?: string;
-  siege?: { ville?: string; code_postal?: string; departement?: string; };
-  code_naf?: string;
-  libelle_code_naf?: string;
-  tranche_effectif?: string;
-}
 
 export interface PappersDirigeant {
   nom: string;
@@ -230,7 +219,7 @@ export interface SurveillanceResult {
 
 export interface SurveillanceConfig {
   nom_client?: string;
-  profil_risque?: 'Conservateur' | 'Équilibré' | 'Dynamique' | 'Entrepreneur';
+  profil_risque?: 'Conservateur' | 'Equilibre' | 'Équilibré' | 'Dynamique' | 'Entrepreneur';
   aum?: number;
   part_entreprise?: number;
   part_patrimoine?: string;

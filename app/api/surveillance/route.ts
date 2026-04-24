@@ -1,16 +1,41 @@
-// charlie-live/app/api/surveillance/route.ts
+// charlie-database/app/api/surveillance/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { getCompanyDetails, companyDetailsToContext } from '../../../lib/datagouv';
 import { getCompanyAnnouncements, bodaccToContext } from '../../../lib/bodacc';
 import { analyzeWithClaude, parseClaudeJsonRobust, PROMPT_SURVEILLANCE } from '../../../lib/claude';
+import { parseJsonBody, jsonError, jsonException, getRequestId } from '../../../lib/http';
+import { logError, logInfo, logWarn } from '../../../lib/logger';
+import { recordApiMetric } from '../../../lib/metrics';
+import { enforceApiSecurity } from '../../../lib/security';
+import { surveillanceRequestSchema, claudeSchemas } from '../../../lib/schemas';
 import type { SurveillanceResult, SurveillanceConfig } from '../../../types';
 
 export async function POST(req: NextRequest) {
-  const body = await req.json() as { siren: string; config: SurveillanceConfig };
-  const { siren, config } = body;
+  const route = '/api/surveillance';
+  const startedAt = Date.now();
+  const requestId = getRequestId(req);
+  logInfo('api.request.start', { route, method: 'POST', request_id: requestId });
+
+  const denied = await enforceApiSecurity(req, 'surveillance', requestId);
+  if (denied) {
+    recordApiMetric(route, denied.status, Date.now() - startedAt);
+    logWarn('api.request.denied', {
+      route,
+      method: 'POST',
+      request_id: requestId,
+      status: denied.status,
+      duration_ms: Date.now() - startedAt,
+    });
+    return denied;
+  }
+
+  const parsedBody = await parseJsonBody(req, surveillanceRequestSchema);
+  if (!parsedBody.ok) return parsedBody.response;
+
+  const { siren, config } = parsedBody.data as { siren: string; config?: SurveillanceConfig };
 
   if (!siren) {
-    return NextResponse.json({ error: 'siren requis' }, { status: 400 });
+    return jsonError('siren requis', 400, 'BAD_REQUEST', undefined, requestId);
   }
 
   try {
@@ -39,12 +64,30 @@ export async function POST(req: NextRequest) {
     ].join('\n');
 
     const raw = await analyzeWithClaude(PROMPT_SURVEILLANCE, userMessage);
-    const result = await parseClaudeJsonRobust<SurveillanceResult>(raw);
+    const result = await parseClaudeJsonRobust<SurveillanceResult>(raw, claudeSchemas.surveillance);
 
-    return NextResponse.json(result);
+    logInfo('api.request.success', {
+      route,
+      method: 'POST',
+      request_id: requestId,
+      status: 200,
+      duration_ms: Date.now() - startedAt,
+    });
+    recordApiMetric(route, 200, Date.now() - startedAt);
+    return NextResponse.json(result, { headers: { 'x-request-id': requestId } });
   } catch (err) {
-    console.error('[/api/surveillance]', err);
-    const message = err instanceof Error ? err.message : 'Erreur interne';
-    return NextResponse.json({ error: message }, { status: 500 });
+    const response = jsonException(err, requestId);
+    recordApiMetric(route, response.status, Date.now() - startedAt);
+    logError(
+      'api.request.error',
+      {
+        route,
+        method: 'POST',
+        request_id: requestId,
+        duration_ms: Date.now() - startedAt,
+      },
+      err
+    );
+    return response;
   }
 }

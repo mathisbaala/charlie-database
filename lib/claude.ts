@@ -1,16 +1,55 @@
-// charlie-live/lib/claude.ts
+// charlie-database/lib/claude.ts
 import Anthropic from '@anthropic-ai/sdk';
+import type { ZodTypeAny } from 'zod';
+import { withSpan } from './telemetry';
+import { recordUpstreamMetric } from './metrics';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = process.env.ANTHROPIC_MODEL?.trim() || 'claude-sonnet-4-6';
+const CLAUDE_TIMEOUT_MS = Number(process.env.CLAUDE_TIMEOUT_MS ?? '35000');
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs = CLAUDE_TIMEOUT_MS): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(`Timeout Anthropic après ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+
+  try {
+    return (await Promise.race([promise, timeoutPromise])) as T;
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
 
 export async function analyzeWithClaude(systemPrompt: string, userMessage: string): Promise<string> {
-  const msg = await client.messages.create({
-    model: MODEL,
-    max_tokens: 2000,
-    system: systemPrompt,
-    messages: [{ role: 'user', content: userMessage }],
-  });
+  const msg = await withSpan(
+    'anthropic.messages.create',
+    {
+      'ai.provider': 'anthropic',
+      'ai.model': MODEL,
+      'ai.max_tokens': 2000,
+    },
+    async () => {
+      const startedAt = Date.now();
+      try {
+        const response = await withTimeout(
+          client.messages.create({
+            model: MODEL,
+            max_tokens: 2000,
+            system: systemPrompt,
+            messages: [{ role: 'user', content: userMessage }],
+          })
+        );
+        recordUpstreamMetric('anthropic.messages.create', 200, Date.now() - startedAt);
+        return response;
+      } catch (err) {
+        recordUpstreamMetric('anthropic.messages.create', 0, Date.now() - startedAt);
+        throw err;
+      }
+    }
+  );
   const block = msg.content[0];
   if (block.type !== 'text') throw new Error('Réponse Claude inattendue');
   return block.text;
@@ -109,23 +148,48 @@ async function repairClaudeJson(raw: string): Promise<string> {
     raw,
   ].join('\n');
 
-  const msg = await client.messages.create({
-    model: MODEL,
-    max_tokens: 2500,
-    temperature: 0,
-    messages: [{ role: 'user', content: prompt }],
-  });
+  const msg = await withSpan(
+    'anthropic.messages.repair_json',
+    {
+      'ai.provider': 'anthropic',
+      'ai.model': MODEL,
+      'ai.max_tokens': 2500,
+    },
+    async () => {
+      const startedAt = Date.now();
+      try {
+        const response = await withTimeout(
+          client.messages.create({
+            model: MODEL,
+            max_tokens: 2500,
+            temperature: 0,
+            messages: [{ role: 'user', content: prompt }],
+          })
+        );
+        recordUpstreamMetric('anthropic.messages.repair_json', 200, Date.now() - startedAt);
+        return response;
+      } catch (err) {
+        recordUpstreamMetric('anthropic.messages.repair_json', 0, Date.now() - startedAt);
+        throw err;
+      }
+    }
+  );
   const block = msg.content[0];
   if (block.type !== 'text') throw new Error('Reparation JSON Claude inattendue');
   return block.text;
 }
 
-export async function parseClaudeJsonRobust<T>(raw: string): Promise<T> {
+function validateWithSchema<T>(value: T, schema?: ZodTypeAny): T {
+  if (!schema) return value;
+  return schema.parse(value) as T;
+}
+
+export async function parseClaudeJsonRobust<T>(raw: string, schema?: ZodTypeAny): Promise<T> {
   try {
-    return parseClaudeJson<T>(raw);
+    return validateWithSchema(parseClaudeJson<T>(raw), schema);
   } catch {
     const repairedRaw = await repairClaudeJson(raw);
-    return parseClaudeJson<T>(repairedRaw);
+    return validateWithSchema(parseClaudeJson<T>(repairedRaw), schema);
   }
 }
 

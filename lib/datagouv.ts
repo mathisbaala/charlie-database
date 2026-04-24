@@ -1,10 +1,13 @@
-// charlie-live/lib/datagouv.ts
+// charlie-database/lib/datagouv.ts
 // API : recherche-entreprises.api.gouv.fr — gratuite, sans clé
 import type { CompanySearchResult } from '../types';
+import { withSpan } from './telemetry';
+import { recordUpstreamMetric } from './metrics';
 
 const BASE = 'https://recherche-entreprises.api.gouv.fr';
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
 const RETRY_DELAYS_MS = [350, 900, 1800];
+const FETCH_TIMEOUT_MS = Number(process.env.UPSTREAM_FETCH_TIMEOUT_MS ?? '12000');
 
 // ─── Types internes bruts API ─────────────────────────────────────────────
 
@@ -14,56 +17,46 @@ interface RawDirigeant {
   annee_de_naissance?: string;
   qualite?: string;
   type_dirigeant?: string;
-  siren?: string;
   denomination?: string;
 }
 
 interface RawSiege {
-  siret?: string;
   adresse?: string;
   code_postal?: string;
-  commune?: string;
   departement?: string;
   region?: string;
   libelle_commune?: string;
   activite_principale?: string;
   libelle_activite_principale?: string;
-  tranche_effectif_salarie?: string;
-  annee_tranche_effectif_salarie?: string;
-  date_creation?: string;
-  est_siege?: boolean;
-  latitude?: string;
-  longitude?: string;
 }
 
-interface RawFinances {
-  [annee: string]: {
-    ca?: number;
-    resultat_net?: number;
-    bilan?: number;
-  };
+interface RawFinanceEntry {
+  ca?: number;
+  resultat_net?: number;
+  bilan?: number;
 }
+
+type RawFinances = Record<string, RawFinanceEntry>;
 
 interface RawCompany {
   siren: string;
   nom_complet: string;
   nom_raison_sociale?: string;
   forme_juridique?: string;
-  nature_juridique?: string;
   date_creation?: string;
-  date_fermeture?: string;
   etat_administratif?: string;
   categorie_entreprise?: string;
   tranche_effectif_salarie?: string;
-  annee_tranche_effectif_salarie?: string;
   activite_principale?: string;
   libelle_activite_principale?: string;
-  section_activite_principale?: string;
   siege?: RawSiege;
   matching_etablissements?: RawSiege[];
   dirigeants?: RawDirigeant[];
   finances?: RawFinances;
-  complements?: Record<string, unknown>;
+}
+
+interface RawSearchResponse {
+  results?: RawCompany[];
 }
 
 // ─── Type enrichi exposé à l'app ─────────────────────────────────────────
@@ -101,7 +94,7 @@ export interface CompanyDetails {
 }
 
 function formatAmount(euros?: number): string {
-  if (!euros) return 'N/D';
+  if (euros == null) return 'N/D';
   if (euros >= 1_000_000_000) return `${(euros / 1_000_000_000).toFixed(1).replace('.', ',')} Md€`;
   if (euros >= 1_000_000) return `${(euros / 1_000_000).toFixed(1).replace('.', ',')} M€`;
   if (euros >= 1_000) return `${(euros / 1_000).toFixed(0)} K€`;
@@ -115,20 +108,42 @@ function sleep(ms: number) {
 }
 
 async function fetchWithRetry(url: string, revalidate: number): Promise<Response> {
-  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
-    const res = await fetch(url, {
-      next: { revalidate },
-      headers: { 'Accept': 'application/json' },
-    });
+  return withSpan(
+    'upstream.datagouv.fetch',
+    {
+      'upstream.name': 'datagouv',
+      'http.url': url,
+      'cache.revalidate': revalidate,
+    },
+    async () => {
+      for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
+        try {
+          const startedAt = Date.now();
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
-    if (res.ok) return res;
-    if (!RETRYABLE_STATUSES.has(res.status)) return res;
-    if (attempt === RETRY_DELAYS_MS.length) return res;
+          const res = await fetch(url, {
+            next: { revalidate },
+            headers: { 'Accept': 'application/json' },
+            signal: controller.signal,
+          }).finally(() => clearTimeout(timeoutId));
+          recordUpstreamMetric('datagouv', res.status, Date.now() - startedAt);
 
-    await sleep(RETRY_DELAYS_MS[attempt]);
-  }
+          if (res.ok) return res;
+          if (!RETRYABLE_STATUSES.has(res.status)) return res;
+          if (attempt === RETRY_DELAYS_MS.length) return res;
 
-  throw new Error('recherche-entreprises: impossible de contacter le service');
+          await sleep(RETRY_DELAYS_MS[attempt]);
+        } catch {
+          recordUpstreamMetric('datagouv', 0, FETCH_TIMEOUT_MS);
+          if (attempt === RETRY_DELAYS_MS.length) break;
+          await sleep(RETRY_DELAYS_MS[attempt]);
+        }
+      }
+
+      throw new Error('recherche-entreprises: impossible de contacter le service');
+    }
+  );
 }
 
 function rawToDetails(r: RawCompany): CompanyDetails {
@@ -182,7 +197,7 @@ export async function getCompanyDetails(siren: string): Promise<CompanyDetails> 
 
   if (!res.ok) throw new Error(`recherche-entreprises: ${res.status}`);
 
-  const data = await res.json() as { results?: RawCompany[] };
+  const data = (await res.json()) as RawSearchResponse;
   const company = (data.results ?? []).find((r) => r.siren === clean) ?? data.results?.[0];
   if (!company) throw new Error(`Entreprise ${siren} introuvable`);
 
@@ -239,14 +254,14 @@ export async function searchEntreprises(query: string): Promise<CompanySearchRes
 
   if (!res.ok) throw new Error(`recherche-entreprises: ${res.status}`);
 
-  const data = await res.json() as { results?: RawCompany[] };
+  const data = (await res.json()) as RawSearchResponse;
 
-  return (data.results ?? []).map((r) => ({
+  return (data.results ?? []).map((r): CompanySearchResult => ({
     siren: r.siren,
     nom: r.nom_complet,
     forme_juridique: r.forme_juridique,
     ville: r.matching_etablissements?.[0]?.libelle_commune ?? r.siege?.libelle_commune,
     secteur: r.libelle_activite_principale ?? r.activite_principale,
     effectif: r.tranche_effectif_salarie,
-  } as CompanySearchResult));
+  }));
 }
