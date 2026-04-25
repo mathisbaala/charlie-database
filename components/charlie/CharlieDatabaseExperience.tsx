@@ -425,7 +425,7 @@ function SearchHero({
             </div>
             <h1>CHARLIE Client</h1>
             <p className="charlie-hero-subtitle">Comprenez en 10 secondes. Décidez en confiance.</p>
-            <p className="landing-subline">Saisissez un nom ou une intention, Charlie structure la lecture client.</p>
+            <p className="landing-subline">Saisissez un nom ou une societe, Charlie structure la lecture client.</p>
           </div>
         </>
       ) : (
@@ -553,9 +553,9 @@ function SignalBadges({ result }: { result: DueDiligenceResult }) {
   const signals = useMemo(() => getStrongSignals(result), [result]);
 
   return (
-    <section className="block reveal" aria-label="Signes forts">
+    <section className="block reveal" aria-label="Signaux forts">
       <header className="block-header">
-        <h3>Signes forts</h3>
+        <h3>Signaux forts</h3>
         <p>Lecture immediate des mouvements critiques.</p>
       </header>
       <div className="signal-grid">

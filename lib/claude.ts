@@ -38,6 +38,7 @@ export async function analyzeWithClaude(systemPrompt: string, userMessage: strin
           client.messages.create({
             model: MODEL,
             max_tokens: 2000,
+            temperature: 0,
             system: systemPrompt,
             messages: [{ role: 'user', content: userMessage }],
           })
@@ -195,14 +196,16 @@ export async function parseClaudeJsonRobust<T>(raw: string, schema?: ZodTypeAny)
 
 // ─── Prompt Due Diligence ──────────────────────────────────────────────────
 export const PROMPT_DUE_DILIGENCE = `Tu es le moteur d'analyse patrimoniale de Charlie, expert en patrimoine de dirigeants de PME françaises.
-Tu reçois des données RÉELLES extraites de Pappers (bilans déposés au greffe, bénéficiaires effectifs INPI) et BODACC.
+Tu reçois des données RÉELLES extraites du Registre National des Entreprises (recherche-entreprises.api.gouv.fr) et du BODACC.
 Ton rôle : synthétiser ces données factuelles en insights patrimoniaux actionnables pour un CGP ou banquier privé.
 
 RÈGLES ABSOLUES :
 - Base-toi UNIQUEMENT sur les données fournies. N'invente aucun chiffre.
 - Si une donnée est absente, indique "N/D" (non disponible), jamais une estimation.
 - Les montants doivent refléter exactement ce qui est dans les données (format "2,3 M€").
-- Chaque signal doit citer sa source exacte (ex: "Pappers · bilan 2022", "BODACC · 15/03/2024").
+- Chaque signal doit citer sa source exacte (ex: "RNE · finances 2022", "BODACC · 15/03/2024").
+- Toute recommandation doit être reliée à un fait observé dans les données sources.
+- Si une affirmation n'est pas vérifiable dans les données fournies, ne l'écris pas.
 
 Réponds UNIQUEMENT en JSON valide, sans markdown, sans backticks.
 
@@ -211,7 +214,7 @@ Structure :
   "societe": {
     "nom": "", "siren": "", "forme": "", "secteur": "", "localisation": "",
     "creation": "", "salaries": "", "ca": "", "ebitda": "", "capitaux_propres": "",
-    "valeur_estimee": "fourchette basée sur multiple sectoriel × EBITDA réel",
+    "valeur_estimee": "N/D si EBITDA indisponible",
     "dividendes": "", "procedure_collective": "Aucune|En cours|Historique"
   },
   "actionnariat": ["Prénom NOM — X% (source)"],
@@ -228,10 +231,10 @@ Structure :
     "niveau": "critique|attention|opportunite",
     "titre": "",
     "description": "description basée sur les données réelles + implication patrimoniale",
-    "source": "Pappers · bilan 2022 | BODACC · 15/03/2024"
+    "source": "RNE · finances 2022 | BODACC · 15/03/2024"
   }],
-  "analyse": "5-7 phrases. Ton conseiller senior. Basé sur les données réelles. Identifie les besoins non adressés.",
-  "actions": [{"priorite": 1, "action": "", "timing": "Avant RDV|Dans les 30j|RDV de transmission", "rationnel": ""}]
+  "analyse": "5-7 phrases, style professionnel premium, clair et actionnable. Basé uniquement sur les données réelles.",
+  "actions": [{"priorite": 1, "action": "", "timing": "Avant RDV|Dans les 30j|RDV de transmission", "rationnel": "Inclure le fait source qui motive l'action"}]
 }`;
 
 // ─── Prompt KYC ────────────────────────────────────────────────────────────
